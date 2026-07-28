@@ -1,12 +1,14 @@
 # CUMOB Image Generation for Codex
 
+**中文** | [English](README.en.md)
+
 一个面向 Codex 的图片生成 Skill，通过当前 Codex provider 调用 OpenAI
 兼容的 Images API 或 Responses API，支持图片生成、编辑、局部重绘和风格转换。
 
 项目内置 Node.js 和 Python 两套零第三方依赖脚本，可直接读取 Codex 的
 `config.toml` 与 `auth.json`，无需把 API Key 写进命令行。
 
-当前版本：`0.1.0`
+当前版本：`0.1.1`
 
 ## 功能
 
@@ -25,6 +27,8 @@
 cumob-image-generation4codex/
 ├── SKILL.md
 ├── README.md
+├── README.en.md
+├── LICENSE
 ├── VERSION
 ├── evals/
 │   └── evals.json
@@ -53,7 +57,7 @@ macOS 或 Linux：
 
 ```bash
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-git clone <repository-url> \
+git clone https://github.com/66964432/cumob-image-generation4codex.git \
   "${CODEX_HOME:-$HOME/.codex}/skills/cumob-image-generation4codex"
 ```
 
@@ -62,7 +66,7 @@ Windows PowerShell：
 ```powershell
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
 New-Item -ItemType Directory -Force (Join-Path $codexHome "skills") | Out-Null
-git clone <repository-url> (Join-Path $codexHome "skills\cumob-image-generation4codex")
+git clone https://github.com/66964432/cumob-image-generation4codex.git (Join-Path $codexHome "skills\cumob-image-generation4codex")
 ```
 
 安装后重新启动 Codex，或新建一个 Codex 任务，使 Skill 列表重新加载。
@@ -74,7 +78,8 @@ git clone <repository-url> (Join-Path $codexHome "skills\cumob-image-generation4
 
 ```bash
 mkdir -p .codex/skills
-git clone <repository-url> .codex/skills/cumob-image-generation4codex
+git clone https://github.com/66964432/cumob-image-generation4codex.git \
+  .codex/skills/cumob-image-generation4codex
 ```
 
 项目级安装是否可用取决于当前 Codex 版本和工作区策略。如果 Codex 没有发现
@@ -297,7 +302,7 @@ node scripts/generate-image.mjs \
 - `PATCH`：向后兼容的错误修复和文档修正。
 
 当前版本保存在仓库根目录的 `VERSION` 文件中。Git tag 使用 `v` 前缀，例如
-`v0.1.0`。
+`v0.1.1`。
 
 ## 发布到 GitHub
 
@@ -306,7 +311,7 @@ node scripts/generate-image.mjs \
 ```bash
 git init
 git add .
-git commit -m "Initial release v0.1.0"
+git commit -m "Initial release v0.1.1"
 git branch -M main
 ```
 
@@ -323,18 +328,18 @@ gh repo create cumob-image-generation4codex \
 或者先在 GitHub 创建空仓库，再手动添加远端：
 
 ```bash
-git remote add origin git@github.com:<github-user>/cumob-image-generation4codex.git
+git remote add origin git@github.com:66964432/cumob-image-generation4codex.git
 git push -u origin main
 ```
 
 创建首个版本标签：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
 ```
 
-然后在 GitHub 的 Releases 页面选择 `v0.1.0`，填写发布说明并发布。
+然后在 GitHub 的 Releases 页面选择对应标签，填写发布说明并发布。
 
 ### 后续发布流程
 
@@ -357,6 +362,4 @@ Skill 可能无法正常工作。
 
 ## License
 
-本仓库暂未附带开源许可证。公开发布前请根据你的使用和分发要求选择许可证，
-例如 MIT、Apache-2.0 或专有许可。未提供许可证时，其他人默认没有复制、修改
-或分发代码的授权。
+本项目采用 [Apache License 2.0](LICENSE) 开源许可证。
