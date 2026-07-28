@@ -10,7 +10,7 @@ The project includes dependency-free Node.js and Python scripts. They read
 Codex's `config.toml` and `auth.json` directly, so API keys do not need to be
 placed on the command line.
 
-Current version: `0.1.1`
+Current version: `0.2.0`
 
 ## Features
 
@@ -29,6 +29,9 @@ Current version: `0.1.1`
   result summaries.
 - Provides `--dry-run` to inspect configuration and request structure without
   exposing API keys or image contents.
+- Compresses reference images larger than 4 MB into temporary uploads with a
+  maximum dimension of 1536 pixels.
+- Preserves transparent PNG inputs and never modifies originals or mask files.
 
 ## Repository Layout
 
@@ -166,6 +169,43 @@ Generate a 1024x1024 product photo of a black ceramic mug and save it to outputs
 
 Codex uses `SKILL.md` to select and run the appropriate script. The CLI can also
 be invoked directly.
+
+### Automatic Reference-image Compression
+
+For image edits, the scripts inspect each `--image` file by default. Inputs
+larger than 4 MB are prepared as temporary local upload copies:
+
+- The longest side is reduced to `1536px`.
+- Ordinary images are converted to JPEG at quality `85`.
+- Images with an alpha channel remain PNG.
+- Original images and `--mask` files are not modified.
+- Temporary files are removed when the command exits.
+
+On macOS, the scripts use the built-in `sips` command. Other platforms try
+ImageMagick's `magick` command. When neither optimizer is available, the scripts
+continue with the original input instead of failing.
+
+Override the defaults:
+
+```bash
+node scripts/generate-image.mjs \
+  --prompt "Restyle while preserving composition" \
+  --image reference.png \
+  --max-input-dimension 1536 \
+  --input-jpeg-quality 85 \
+  --input-optimize-threshold-mb 4 \
+  --out outputs/result.png
+```
+
+Upload original input files without preprocessing:
+
+```bash
+node scripts/generate-image.mjs \
+  --prompt "Use the exact original input bytes" \
+  --image reference.png \
+  --no-input-optimization \
+  --out outputs/result.png
+```
 
 ### Generate an Image
 
@@ -318,7 +358,7 @@ The project follows semantic versioning:
 - `PATCH`: backward-compatible fixes and documentation changes.
 
 The current version is stored in the root `VERSION` file. Git tags use a `v`
-prefix, for example `v0.1.1`.
+prefix, for example `v0.2.0`.
 
 ## Publishing to GitHub
 
@@ -327,7 +367,7 @@ For a directory that has not been initialized as a Git repository:
 ```bash
 git init
 git add .
-git commit -m "Initial release v0.1.1"
+git commit -m "Initial release v0.2.0"
 git branch -M main
 ```
 
@@ -351,8 +391,8 @@ git push -u origin main
 Create a release tag:
 
 ```bash
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
 ```
 
 Then create a GitHub Release from the corresponding tag.

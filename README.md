@@ -8,7 +8,7 @@
 项目内置 Node.js 和 Python 两套零第三方依赖脚本，可直接读取 Codex 的
 `config.toml` 与 `auth.json`，无需把 API Key 写进命令行。
 
-当前版本：`0.1.1`
+当前版本：`0.2.0`
 
 ## 功能
 
@@ -20,6 +20,8 @@
 - 仅使用运行时标准库，无需执行 `npm install` 或 `pip install`。
 - 长时间生成时在 stderr 输出进度，stdout 保留给结果摘要。
 - 提供 `--dry-run` 检查配置和请求结构，不会显示 API Key 或图片内容。
+- 默认在上传前将超过 4MB 的参考图压缩为最长边 1536px 的临时副本。
+- 自动保护透明 PNG，且不会修改原图或蒙版文件。
 
 ## 项目结构
 
@@ -153,6 +155,42 @@ export OPENAI_API_KEY="<your-api-key>"
 ```
 
 Codex 会根据 `SKILL.md` 调用对应脚本。也可以直接运行 CLI。
+
+### 自动压缩参考图片
+
+图片编辑时，脚本会默认检查每个 `--image` 文件。超过 4MB 的输入会先在本地
+生成临时上传副本：
+
+- 最长边缩小到 `1536px`
+- 普通图片转换为质量 `85` 的 JPEG
+- 带透明通道的图片继续使用 PNG
+- 原图和 `--mask` 文件保持不变
+- 请求结束后自动删除临时文件
+
+macOS 使用系统自带的 `sips`。其他平台会尝试使用 ImageMagick 的 `magick`
+命令；找不到优化工具时自动使用原图，不会中断生成。
+
+调整默认参数：
+
+```bash
+node scripts/generate-image.mjs \
+  --prompt "Restyle while preserving composition" \
+  --image reference.png \
+  --max-input-dimension 1536 \
+  --input-jpeg-quality 85 \
+  --input-optimize-threshold-mb 4 \
+  --out outputs/result.png
+```
+
+需要上传原始文件时：
+
+```bash
+node scripts/generate-image.mjs \
+  --prompt "Use the exact original input bytes" \
+  --image reference.png \
+  --no-input-optimization \
+  --out outputs/result.png
+```
 
 ### 生成图片
 
@@ -302,7 +340,7 @@ node scripts/generate-image.mjs \
 - `PATCH`：向后兼容的错误修复和文档修正。
 
 当前版本保存在仓库根目录的 `VERSION` 文件中。Git tag 使用 `v` 前缀，例如
-`v0.1.1`。
+`v0.2.0`。
 
 ## 发布到 GitHub
 
@@ -311,7 +349,7 @@ node scripts/generate-image.mjs \
 ```bash
 git init
 git add .
-git commit -m "Initial release v0.1.1"
+git commit -m "Initial release v0.2.0"
 git branch -M main
 ```
 
@@ -335,8 +373,8 @@ git push -u origin main
 创建首个版本标签：
 
 ```bash
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
 ```
 
 然后在 GitHub 的 Releases 页面选择对应标签，填写发布说明并发布。

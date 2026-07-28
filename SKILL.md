@@ -16,8 +16,9 @@ For CUMOB, configure `base_url = "http://api.cumob.com/v1"`, `image_api = "image
 
 - Preferred runtime: Node.js 18+ with `scripts/generate-image.mjs`.
 - Fallback runtime: Python 3 with `scripts/generate-image.py` when Node is unavailable.
-- The Node script uses only built-in modules: `fs`, `os`, and `path`, plus built-in `fetch`.
+- The Node script uses only built-in modules: `fs`, `os`, `path`, and `child_process`, plus built-in `fetch`.
 - The Python script uses only the standard library: `urllib`, `json`, `base64`, `pathlib`, and related built-ins.
+- Local input optimization uses macOS `sips` when available, or ImageMagick's `magick` command on other platforms. Neither tool is required; the scripts fall back to the original image when no optimizer is available.
 - Does not require `npm install`, `pip install`, the OpenAI SDK, curl, jq, or base64 shell utilities.
 - Works on Linux, macOS, and Windows when run as `node <skill-dir>/scripts/generate-image.mjs ...` or `python3 <skill-dir>/scripts/generate-image.py ...`.
 - Do not rely on executable bits, shebang behavior, or Bash line continuations for Windows usage.
@@ -78,11 +79,31 @@ Treat image generation and editing as long-running operations. A normal request 
 - Treat `[image-generation] Still waiting...` messages as healthy progress, not as a failure condition.
 - Use `--no-progress` only when stderr must stay silent; otherwise leave progress enabled so long requests are visibly alive.
 
+## Automatic Input Optimization
+
+Input optimization is a fixed part of the default workflow. Before an edit request, the scripts inspect every `--image` file and locally prepare a temporary upload copy when the file is larger than 4 MB:
+
+- Resize the longest side to at most 1536 pixels.
+- Convert ordinary photographic inputs to JPEG at quality 85.
+- Preserve PNG for images with an alpha channel.
+- Never modify the original file.
+- Never optimize the `--mask` file.
+- Delete all temporary copies when the command exits.
+- Use the original file without failing when `sips` or ImageMagick is unavailable.
+
+The progress output reports the original and optimized sizes. For example:
+
+```text
+[image-generation] Optimized input 1/2 locally with sips: 10.1MB -> 603KB.
+```
+
+Use `--no-input-optimization` only when exact source bytes are required or local preprocessing causes a compatibility issue. Override the defaults with `--max-input-dimension`, `--input-jpeg-quality`, or `--input-optimize-threshold-mb`.
+
 ## Default Workflow
 
 1. Clarify only missing creative requirements that materially affect the image, such as subject, style, aspect ratio, or output filename.
 2. Prefer saving generated files under a local output directory such as `outputs/` unless the user named a path.
-3. Run one bundled script once and wait for it to complete. The script automatically selects the configured image backend. Prefer Node when available:
+3. Run one bundled script once and wait for it to complete. The script automatically optimizes large input copies locally, selects the configured image backend, and deletes temporary files after the request. Prefer Node when available:
 
    ```bash
    node <skill-dir>/scripts/generate-image.mjs \
@@ -227,6 +248,10 @@ The scripts map common image generation options to either the Images API or Resp
 - `--input-fidelity high|low`
 - `--moderation auto|low`
 - `--output-compression <0-100>`
+- `--max-input-dimension <pixels>` local input resize limit; defaults to `1536`
+- `--input-jpeg-quality <1-100>` local JPEG quality; defaults to `85`
+- `--input-optimize-threshold-mb <number>` optimize inputs larger than this; defaults to `4`
+- `--no-input-optimization` uploads original input images without local preprocessing
 - `--response-model <model>` Responses model; defaults to Codex's configured model
 - `--image-api responses|images` overrides the provider's `image_api`
 - `--api-key-env <name>` API key environment variable name when Codex auth is unavailable; defaults to `OPENAI_API_KEY`

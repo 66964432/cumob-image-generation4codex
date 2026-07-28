@@ -7,7 +7,10 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -73,12 +76,22 @@ def parse_args():
     parser.add_argument("--moderation", choices=["auto", "low"])
     parser.add_argument("--output-compression", type=int)
     parser.add_argument("--partial-images", type=int)
+    parser.add_argument("--max-input-dimension", type=int, default=1536)
+    parser.add_argument("--input-jpeg-quality", type=int, default=85)
+    parser.add_argument("--input-optimize-threshold-mb", type=float, default=4)
+    parser.add_argument("--no-input-optimization", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
     if args.deprecated_api_key is not None:
         die("--api-key was removed to avoid exposing secrets in command lines. Use Codex auth.json or --api-key-env <name>.")
+    if not 256 <= args.max_input_dimension <= 8192:
+        die("--max-input-dimension must be between 256 and 8192")
+    if not 1 <= args.input_jpeg_quality <= 100:
+        die("--input-jpeg-quality must be between 1 and 100")
+    if not 0 <= args.input_optimize_threshold_mb <= 1024:
+        die("--input-optimize-threshold-mb must be between 0 and 1024")
     return args
 
 
@@ -227,6 +240,161 @@ def image_file_to_data_url(file_path):
         die(f"image file not found: {file_path}")
     data = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type_for(path)};base64,{data}"
+
+
+def format_bytes(byte_count):
+    if byte_count < 1024 * 1024:
+        return f"{round(byte_count / 1024)}KB"
+    return f"{byte_count / (1024 * 1024):.1f}MB"
+
+
+def find_input_optimizer():
+    if sys.platform == "darwin" and Path("/usr/bin/sips").exists():
+        return {"name": "sips", "command": "/usr/bin/sips"}
+    magick = shutil.which("magick")
+    if magick:
+        return {"name": "imagemagick", "command": magick}
+    return None
+
+
+def input_has_alpha(image_path, optimizer):
+    if optimizer["name"] == "sips":
+        result = subprocess.run(
+            [optimizer["command"], "-g", "hasAlpha", str(image_path)],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and bool(
+            re.search(r"hasAlpha:\s*yes", result.stdout, re.IGNORECASE)
+        )
+    result = subprocess.run(
+        [optimizer["command"], "identify", "-format", "%[channels]", str(image_path)],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and "a" in result.stdout.lower()
+
+
+def optimize_input_images(args):
+    originals = list(args.image)
+    args.original_images = originals
+    args.input_optimization = []
+    if args.no_input_optimization or not originals:
+        return None
+
+    threshold_bytes = args.input_optimize_threshold_mb * 1024 * 1024
+    optimizer = find_input_optimizer()
+    temp_dir = None
+    prepared = []
+
+    for index, image_path_value in enumerate(originals):
+        image_path = Path(image_path_value)
+        if not image_path.exists():
+            die(f"image file not found: {image_path}")
+        original_bytes = image_path.stat().st_size
+        if original_bytes <= threshold_bytes:
+            args.input_optimization.append({
+                "original": str(image_path.resolve()),
+                "optimized": False,
+                "reason": "below-threshold",
+                "bytes": original_bytes,
+            })
+            prepared.append(str(image_path))
+            continue
+        if not optimizer:
+            progress(
+                args,
+                f"Input {image_path} is {format_bytes(original_bytes)}, but no local optimizer is available; using the original file.",
+            )
+            args.input_optimization.append({
+                "original": str(image_path.resolve()),
+                "optimized": False,
+                "reason": "optimizer-unavailable",
+                "bytes": original_bytes,
+            })
+            prepared.append(str(image_path))
+            continue
+
+        if temp_dir is None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="codex-image-input-"))
+        preserve_alpha = bool(input_has_alpha(image_path, optimizer))
+        target_format = "png" if preserve_alpha else "jpeg"
+        target = temp_dir / f"input-{index + 1}.{'png' if preserve_alpha else 'jpg'}"
+
+        if optimizer["name"] == "sips":
+            command = [
+                optimizer["command"],
+                "-Z",
+                str(args.max_input_dimension),
+                "-s",
+                "format",
+                target_format,
+            ]
+            if not preserve_alpha:
+                command.extend([
+                    "-s",
+                    "formatOptions",
+                    str(args.input_jpeg_quality),
+                ])
+            command.extend([str(image_path), "--out", str(target)])
+        else:
+            command = [
+                optimizer["command"],
+                str(image_path),
+                "-auto-orient",
+                "-resize",
+                f"{args.max_input_dimension}x{args.max_input_dimension}>",
+            ]
+            if not preserve_alpha:
+                command.extend(["-quality", str(args.input_jpeg_quality)])
+            command.append(str(target))
+
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0 or not target.exists():
+            progress(
+                args,
+                f"Local optimization failed for {image_path}; using the original file.",
+            )
+            args.input_optimization.append({
+                "original": str(image_path.resolve()),
+                "optimized": False,
+                "reason": "optimizer-failed",
+                "bytes": original_bytes,
+            })
+            prepared.append(str(image_path))
+            continue
+
+        optimized_bytes = target.stat().st_size
+        if optimized_bytes >= original_bytes:
+            target.unlink(missing_ok=True)
+            args.input_optimization.append({
+                "original": str(image_path.resolve()),
+                "optimized": False,
+                "reason": "no-size-benefit",
+                "bytes": original_bytes,
+            })
+            prepared.append(str(image_path))
+            continue
+
+        progress(
+            args,
+            f"Optimized input {index + 1}/{len(originals)} locally with {optimizer['name']}: {format_bytes(original_bytes)} -> {format_bytes(optimized_bytes)}.",
+        )
+        args.input_optimization.append({
+            "original": str(image_path.resolve()),
+            "path": str(target),
+            "optimized": True,
+            "optimizer": optimizer["name"],
+            "original_bytes": original_bytes,
+            "optimized_bytes": optimized_bytes,
+            "max_dimension": args.max_input_dimension,
+            "output_format": target_format,
+            "jpeg_quality": None if preserve_alpha else args.input_jpeg_quality,
+        })
+        prepared.append(str(target))
+
+    args.image = prepared
+    return temp_dir
 
 
 def build_tool(args):
@@ -487,6 +655,10 @@ def run_images_api(prompt, args, config):
             "request": {
                 **image_request["fields"],
                 "images": [str(Path(image).resolve()) for image in args.image],
+                "original_images": [
+                    str(Path(image).resolve()) for image in args.original_images
+                ],
+                "input_optimization": args.input_optimization,
                 "mask": str(Path(args.mask).resolve()) if args.mask else None,
             },
         }, indent=2))
@@ -541,13 +713,7 @@ def run_images_api(prompt, args, config):
             print(f"Wrote {file_path}")
 
 
-def main():
-    args = parse_args()
-    prompt = read_prompt(args)
-    config = resolve_codex_config(args)
-    if config["image_api"] == "images":
-        run_images_api(prompt, args, config)
-        return
+def run_responses_api(prompt, args, config):
     tool = build_tool(args)
     if "model" not in tool and config["image_model"]:
         tool["model"] = config["image_model"]
@@ -569,6 +735,10 @@ def main():
             "response_model": config["response_model"],
             "has_api_key": config["has_api_key"],
             "api_key_source": config["api_key_source"],
+            "original_images": [
+                str(Path(image).resolve()) for image in args.original_images
+            ],
+            "input_optimization": args.input_optimization,
             "request": redact_request(request_body),
         }, indent=2))
         return
@@ -616,6 +786,21 @@ def main():
     else:
         for file_path in written:
             print(f"Wrote {file_path}")
+
+
+def main():
+    args = parse_args()
+    prompt = read_prompt(args)
+    config = resolve_codex_config(args)
+    temp_dir = optimize_input_images(args)
+    try:
+        if config["image_api"] == "images":
+            run_images_api(prompt, args, config)
+            return
+        run_responses_api(prompt, args, config)
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

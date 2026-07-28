@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const HELP = `
 Usage:
@@ -34,8 +35,13 @@ Image generation options:
   --moderation <auto|low>
   --output-compression <0-100>
   --partial-images <0-3>
+  --max-input-dimension <pixels>  Local input resize limit. Default: 1536.
+  --input-jpeg-quality <1-100>    Local JPEG quality. Default: 85.
+  --input-optimize-threshold-mb <number>
+                                Optimize inputs larger than this. Default: 4.
 
 Other:
+  --no-input-optimization     Upload original input images without local preprocessing.
   --dry-run                   Print redacted config and request body without calling the API.
   --json                      Print machine-readable result summary.
   --no-progress               Disable progress messages on stderr while waiting for the API.
@@ -82,7 +88,7 @@ function parseArgs(argv) {
     if (key === "api-key") {
       die("--api-key was removed to avoid exposing secrets in command lines. Use Codex auth.json or --api-key-env <name>.");
     }
-    if (["help", "dry-run", "json", "no-progress"].includes(key)) {
+    if (["help", "dry-run", "json", "no-progress", "no-input-optimization"].includes(key)) {
       args[key] = true;
       continue;
     }
@@ -244,6 +250,171 @@ function imageFileToDataUrl(filePath) {
   if (!fs.existsSync(filePath)) die(`image file not found: ${filePath}`);
   const data = fs.readFileSync(filePath).toString("base64");
   return `data:${mimeTypeFor(filePath)};base64,${data}`;
+}
+
+function numericOption(args, key, defaultValue, minimum, maximum) {
+  if (args[key] === undefined) return defaultValue;
+  const value = Number(args[key]);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    die(`--${key} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function findInputOptimizer() {
+  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sips")) {
+    return { name: "sips", command: "/usr/bin/sips" };
+  }
+  const magick = spawnSync("magick", ["-version"], { stdio: "ignore" });
+  if (!magick.error && magick.status === 0) {
+    return { name: "imagemagick", command: "magick" };
+  }
+  return null;
+}
+
+function inputHasAlpha(imagePath, optimizer) {
+  if (optimizer.name === "sips") {
+    const result = spawnSync(optimizer.command, ["-g", "hasAlpha", imagePath], {
+      encoding: "utf8",
+    });
+    return !result.error && result.status === 0 && /hasAlpha:\s*yes/i.test(result.stdout);
+  }
+  const result = spawnSync(
+    optimizer.command,
+    ["identify", "-format", "%[channels]", imagePath],
+    { encoding: "utf8" },
+  );
+  return !result.error && result.status === 0 && /a/i.test(result.stdout);
+}
+
+function optimizeInputImages(args) {
+  const originals = [...args.image];
+  args.originalImages = originals;
+  args.inputOptimization = [];
+  if (args["no-input-optimization"] || originals.length === 0) {
+    return () => {};
+  }
+
+  const maxDimension = Math.round(numericOption(args, "max-input-dimension", 1536, 256, 8192));
+  const jpegQuality = Math.round(numericOption(args, "input-jpeg-quality", 85, 1, 100));
+  const thresholdMb = numericOption(args, "input-optimize-threshold-mb", 4, 0, 1024);
+  const thresholdBytes = thresholdMb * 1024 * 1024;
+  const optimizer = findInputOptimizer();
+  let tempDir;
+  const cleanup = () => {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  };
+  process.once("exit", cleanup);
+
+  args.image = originals.map((imagePath, index) => {
+    if (!fs.existsSync(imagePath)) die(`image file not found: ${imagePath}`);
+    const originalBytes = fs.statSync(imagePath).size;
+    if (originalBytes <= thresholdBytes) {
+      args.inputOptimization.push({
+        original: path.resolve(imagePath),
+        optimized: false,
+        reason: "below-threshold",
+        bytes: originalBytes,
+      });
+      return imagePath;
+    }
+    if (!optimizer) {
+      progress(args, `Input ${imagePath} is ${formatBytes(originalBytes)}, but no local optimizer is available; using the original file.`);
+      args.inputOptimization.push({
+        original: path.resolve(imagePath),
+        optimized: false,
+        reason: "optimizer-unavailable",
+        bytes: originalBytes,
+      });
+      return imagePath;
+    }
+
+    tempDir ||= fs.mkdtempSync(path.join(os.tmpdir(), "codex-image-input-"));
+    const preserveAlpha = inputHasAlpha(imagePath, optimizer);
+    const targetFormat = preserveAlpha ? "png" : "jpeg";
+    const target = path.join(tempDir, `input-${index + 1}.${preserveAlpha ? "png" : "jpg"}`);
+    let result;
+    if (optimizer.name === "sips") {
+      const sipsArgs = [
+        "-Z", String(maxDimension),
+        "-s", "format", targetFormat,
+      ];
+      if (!preserveAlpha) {
+        sipsArgs.push("-s", "formatOptions", String(jpegQuality));
+      }
+      sipsArgs.push(imagePath, "--out", target);
+      result = spawnSync(
+        optimizer.command,
+        sipsArgs,
+        { encoding: "utf8" },
+      );
+    } else {
+      const magickArgs = [
+        imagePath,
+        "-auto-orient",
+        "-resize", `${maxDimension}x${maxDimension}>`,
+      ];
+      if (!preserveAlpha) {
+        magickArgs.push("-quality", String(jpegQuality));
+      }
+      magickArgs.push(target);
+      result = spawnSync(
+        optimizer.command,
+        magickArgs,
+        { encoding: "utf8" },
+      );
+    }
+
+    if (result.error || result.status !== 0 || !fs.existsSync(target)) {
+      progress(args, `Local optimization failed for ${imagePath}; using the original file.`);
+      args.inputOptimization.push({
+        original: path.resolve(imagePath),
+        optimized: false,
+        reason: "optimizer-failed",
+        bytes: originalBytes,
+      });
+      return imagePath;
+    }
+
+    const optimizedBytes = fs.statSync(target).size;
+    if (optimizedBytes >= originalBytes) {
+      fs.rmSync(target, { force: true });
+      args.inputOptimization.push({
+        original: path.resolve(imagePath),
+        optimized: false,
+        reason: "no-size-benefit",
+        bytes: originalBytes,
+      });
+      return imagePath;
+    }
+
+    progress(
+      args,
+      `Optimized input ${index + 1}/${originals.length} locally with ${optimizer.name}: ${formatBytes(originalBytes)} -> ${formatBytes(optimizedBytes)}.`,
+    );
+    args.inputOptimization.push({
+      original: path.resolve(imagePath),
+      path: target,
+      optimized: true,
+      optimizer: optimizer.name,
+      original_bytes: originalBytes,
+      optimized_bytes: optimizedBytes,
+      max_dimension: maxDimension,
+      output_format: targetFormat,
+      jpeg_quality: preserveAlpha ? undefined : jpegQuality,
+    });
+    return target;
+  });
+
+  return () => {
+    process.removeListener("exit", cleanup);
+    cleanup();
+  };
 }
 
 function buildTool(args) {
@@ -418,6 +589,8 @@ async function runImagesApi(prompt, args, config, outputPath) {
       request: {
         ...request.fields,
         images: args.image.map((imagePath) => path.resolve(imagePath)),
+        original_images: args.originalImages?.map((imagePath) => path.resolve(imagePath)),
+        input_optimization: args.inputOptimization,
         mask: args.mask ? path.resolve(args.mask) : undefined,
       },
     }, null, 2));
@@ -506,101 +679,108 @@ async function main() {
   const prompt = await readPrompt(args);
   const config = resolveCodexConfig(args);
   const outputPath = args.out || "generated.png";
-  if (config.imageApi === "images") {
-    await runImagesApi(prompt, args, config, outputPath);
-    return;
-  }
-  const tool = buildTool(args);
-  if (!tool.model && config.imageModel) tool.model = config.imageModel;
-  const requestBody = {
-    model: config.responseModel,
-    input: buildInput(prompt, args),
-    tools: [tool],
-  };
+  const cleanupOptimizedInputs = optimizeInputImages(args);
+  try {
+    if (config.imageApi === "images") {
+      await runImagesApi(prompt, args, config, outputPath);
+      return;
+    }
+    const tool = buildTool(args);
+    if (!tool.model && config.imageModel) tool.model = config.imageModel;
+    const requestBody = {
+      model: config.responseModel,
+      input: buildInput(prompt, args),
+      tools: [tool],
+    };
 
-  if (args["dry-run"]) {
-    console.log(JSON.stringify({
-      codex_home: config.codexHome,
-      config_path: config.configPath,
-      auth_path: config.authPath,
+    if (args["dry-run"]) {
+      console.log(JSON.stringify({
+        codex_home: config.codexHome,
+        config_path: config.configPath,
+        auth_path: config.authPath,
+        provider: config.providerName,
+        base_url: config.baseUrl,
+        endpoint: `${config.baseUrl}/responses`,
+        response_model: config.responseModel,
+        has_api_key: config.hasApiKey,
+        api_key_source: config.apiKeySource,
+        original_images: args.originalImages?.map((imagePath) => path.resolve(imagePath)),
+        input_optimization: args.inputOptimization,
+        request: redactRequest(requestBody),
+      }, null, 2));
+      return;
+    }
+
+    let response;
+    let responseText;
+    const stopProgress = startProgress(args);
+    try {
+      response = await fetch(`${config.baseUrl}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      responseText = await response.text();
+    } finally {
+      stopProgress();
+    }
+    progress(args, "Response received. Decoding image data.");
+
+    let responseJson;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {
+      die(`API returned non-JSON response with status ${response.status}: ${responseText.slice(0, 500)}`);
+    }
+
+    if (!response.ok) {
+      const message = responseJson.error?.message || responseJson.message || JSON.stringify(responseJson).slice(0, 1000);
+      die(`API request failed with status ${response.status}: ${message}`);
+    }
+
+    const imageResults = [];
+    for (const item of responseJson.output || []) {
+      if (item.type === "image_generation_call" && item.result) {
+        imageResults.push(item.result);
+      }
+    }
+
+    if (imageResults.length === 0) {
+      console.error(JSON.stringify(summarizeResponse(responseJson), null, 2));
+      die("response did not contain output[].type == image_generation_call with a result.");
+    }
+
+    const outputFormat = tool.output_format || path.extname(outputPath).replace(".", "") || "png";
+    const written = [];
+    for (let i = 0; i < imageResults.length; i += 1) {
+      const target = outputPathFor(outputPath, i, imageResults.length, outputFormat);
+      fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
+      fs.writeFileSync(target, Buffer.from(imageResults[i], "base64"));
+      written.push(target);
+    }
+
+    const summary = {
+      response_id: responseJson.id,
       provider: config.providerName,
       base_url: config.baseUrl,
-      endpoint: `${config.baseUrl}/responses`,
       response_model: config.responseModel,
-      has_api_key: config.hasApiKey,
-      api_key_source: config.apiKeySource,
-      request: redactRequest(requestBody),
-    }, null, 2));
-    return;
-  }
+      image_model: tool.model || "api-default",
+      outputs: written,
+    };
 
-  let response;
-  let responseText;
-  const stopProgress = startProgress(args);
-  try {
-    response = await fetch(`${config.baseUrl}/responses`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    responseText = await response.text();
+    if (args.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      for (const filePath of written) {
+        console.log(`Wrote ${filePath}`);
+      }
+    }
   } finally {
-    stopProgress();
-  }
-  progress(args, "Response received. Decoding image data.");
-
-  let responseJson;
-  try {
-    responseJson = JSON.parse(responseText);
-  } catch {
-    die(`API returned non-JSON response with status ${response.status}: ${responseText.slice(0, 500)}`);
-  }
-
-  if (!response.ok) {
-    const message = responseJson.error?.message || responseJson.message || JSON.stringify(responseJson).slice(0, 1000);
-    die(`API request failed with status ${response.status}: ${message}`);
-  }
-
-  const imageResults = [];
-  for (const item of responseJson.output || []) {
-    if (item.type === "image_generation_call" && item.result) {
-      imageResults.push(item.result);
-    }
-  }
-
-  if (imageResults.length === 0) {
-    console.error(JSON.stringify(summarizeResponse(responseJson), null, 2));
-    die("response did not contain output[].type == image_generation_call with a result.");
-  }
-
-  const outputFormat = tool.output_format || path.extname(outputPath).replace(".", "") || "png";
-  const written = [];
-  for (let i = 0; i < imageResults.length; i += 1) {
-    const target = outputPathFor(outputPath, i, imageResults.length, outputFormat);
-    fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
-    fs.writeFileSync(target, Buffer.from(imageResults[i], "base64"));
-    written.push(target);
-  }
-
-  const summary = {
-    response_id: responseJson.id,
-    provider: config.providerName,
-    base_url: config.baseUrl,
-    response_model: config.responseModel,
-    image_model: tool.model || "api-default",
-    outputs: written,
-  };
-
-  if (args.json) {
-    console.log(JSON.stringify(summary, null, 2));
-  } else {
-    for (const filePath of written) {
-      console.log(`Wrote ${filePath}`);
-    }
+    cleanupOptimizedInputs();
   }
 }
 
