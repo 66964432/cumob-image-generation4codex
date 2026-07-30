@@ -107,7 +107,7 @@ model = "your-response-model"
 name = "CUMOB"
 base_url = "http://api.cumob.com/v1"
 image_api = "images"
-image_model = "gpt-image-2"
+image_model = "gpt-image-2-ref"
 ```
 
 脚本会调用：
@@ -314,7 +314,7 @@ PYTHONPYCACHEPREFIX=/tmp/cumob-image-pycache \
 node scripts/generate-image.mjs \
   --prompt "test" \
   --image-api images \
-  --image-model gpt-image-2 \
+  --image-model gpt-image-2-ref \
   --dry-run
 ```
 

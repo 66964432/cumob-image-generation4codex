@@ -10,7 +10,7 @@ Use this skill to create or edit images through the active Codex provider. The b
 - `image_api = "images"`: call `<base_url>/images/generations` or `<base_url>/images/edits` directly.
 - `image_api = "responses"` or unset: call `<base_url>/responses` with the `image_generation` tool.
 
-For CUMOB, configure `base_url = "http://api.cumob.com/v1"`, `image_api = "images"`, and `image_model = "gpt-image-2"`.
+For CUMOB, configure `base_url = "http://api.cumob.com/v1"`, `image_api = "images"`, and `image_model = "gpt-image-2-ref"`.
 
 ## Runtime And Dependencies
 
@@ -228,7 +228,7 @@ For a one-off backend override:
 ```bash
 node <skill-dir>/scripts/generate-image.mjs \
   --image-api images \
-  --image-model gpt-image-2 \
+  --image-model gpt-image-2-ref \
   --prompt "A quick test image" \
   --out outputs/test.png
 ```
